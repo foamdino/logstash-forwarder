@@ -1,0 +1,117 @@
+From 88512d663f3101eb3b386957c0f26b8de622ce98 Mon Sep 17 00:00:00 2001
+From: Sergey Zorchenko <szorchenko@ozon.ru>
+Date: Thu, 25 Sep 2014 13:06:13 +0400
+Subject: [PATCH] added existing file check in windows registrar (get rid of
+ FileNoFound error) added remove old file before rename windows registrar (get
+ rid of FileAlreadyExists error) changed to explicit file close in
+ writeRegistry() because 'defer' wont be exected before rotation methods
+ called and it blocks file
+
+added loadState function to load the state from files and correctly close it
+---
+ logstash-forwarder.go | 39 ++++++++++++++++++++++-----------------
+ registrar.go          |  4 ++--
+ registrar_windows.go  |  8 +++++---
+ 3 files changed, 29 insertions(+), 22 deletions(-)
+
+diff --git a/logstash-forwarder.go b/logstash-forwarder.go
+index cb52165..75997ff 100644
+--- a/logstash-forwarder.go
++++ b/logstash-forwarder.go
+@@ -157,22 +157,7 @@ func main() {
+ 	// Finally, prospector uses the registrar information, on restart, to
+ 	// determine where in each file to restart a harvester.
+ 
+-	restart := &ProspectorResume{}
+-	restart.persist = make(chan *FileState)
+-
+-	// Load the previous log file locations now, for use in prospector
+-	restart.files = make(map[string]*FileState)
+-	if existing, e := os.Open(".logstash-forwarder"); e == nil {
+-		defer existing.Close()
+-		wd := ""
+-		if wd, e = os.Getwd(); e != nil {
+-			emit("WARNING: os.Getwd retuned unexpected error %s -- ignoring\n", e.Error())
+-		}
+-		emit("Loading registrar data from %s/.logstash-forwarder\n", wd)
+-
+-		decoder := json.NewDecoder(existing)
+-		decoder.Decode(&restart.files)
+-	}
++	restart := loadState()
+ 
+ 	pendingProspectorCnt := 0
+ 
+@@ -211,6 +196,26 @@ func main() {
+ 	Registrar(persist, registrar_chan)
+ }
+ 
++func loadState() *ProspectorResume {
++	restart := &ProspectorResume{}
++	restart.persist = make(chan *FileState)
++
++	// Load the previous log file locations now, for use in prospector
++	restart.files = make(map[string]*FileState)    
++	if existing, e := os.Open(".logstash-forwarder"); e == nil {
++		defer existing.Close() 
++		wd := ""
++		if wd, e = os.Getwd(); e != nil {
++			emit("WARNING: os.Getwd retuned unexpected error %s -- ignoring\n", e.Error())
++		}
++		emit("Loading registrar data from %s/.logstash-forwarder\n", wd)
++
++		decoder := json.NewDecoder(existing)
++		decoder.Decode(&restart.files)	
++	}    
++	return restart
++}
++
+ // REVU: yes, this is a temp hack.
+ func emit(msgfmt string, args ...interface{}) {
+ 	if options.quiet {
+@@ -230,4 +235,4 @@ func exit(stat int, msgfmt string, args ...interface{}) {
+ 
+ func runProfiler() bool {
+ 	return options.cpuProfileFile != ""
+-}
++}
+\ No newline at end of file
+diff --git a/registrar.go b/registrar.go
+index f49c1d3..551988d 100644
+--- a/registrar.go
++++ b/registrar.go
+@@ -42,10 +42,10 @@ func writeRegistry(state map[string]*FileState, path string) error {
+ 		emit("Failed to create tempfile (%s) for writing: %s\n", tempfile, e)
+ 		return e
+ 	}
+-	defer file.Close()
+ 
+ 	encoder := json.NewEncoder(file)
+ 	encoder.Encode(state)
+-
++	file.Close()
++    
+ 	return onRegistryWrite(path, tempfile)
+ }
+diff --git a/registrar_windows.go b/registrar_windows.go
+index 525d641..7ec5949 100644
+--- a/registrar_windows.go
++++ b/registrar_windows.go
+@@ -7,12 +7,14 @@ import (
+ func onRegistryWrite(path, tempfile string) error {
+ 	old := path + ".old"
+ 	var e error
+-	
+-	if e = os.Rename(path, old); e != nil {
++    
++	os.Remove(old);
++    
++	if e = os.Rename(path, old); e != nil && !os.IsNotExist(e) {
+ 		emit("registry rotate: rename of %s to %s - %s\n", path, old, e)
+ 		return e
+ 	}
+-	
++
+ 	if e = os.Rename(tempfile, path); e != nil {
+ 		emit("registry rotate: rename of %s to %s - %s\n", tempfile, path, e)
+ 		return e
